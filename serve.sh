@@ -46,7 +46,7 @@ GREEN='\033[0;32m'
 NC='\033[0m'
 info() { echo -e "\${GREEN}[INFO]\${NC} \$*"; }
 
-DEST="\$HOME/scripts"
+DEST="\$HOME/arch-setup"
 mkdir -p "\$DEST"
 
 SCRIPTS=(
@@ -99,7 +99,7 @@ echo -e "  ${GREEN}# Option 1: Download all scripts, then run manually${NC}"
 echo -e "  ${BOLD}curl -fsSL http://${LOCAL_IP}:${PORT}/bootstrap.sh | bash -s ${LOCAL_IP}:${PORT}${NC}"
 echo ""
 echo -e "  ${GREEN}# Option 2: Download + immediately start full install${NC}"
-echo -e "  ${BOLD}curl -fsSL http://${LOCAL_IP}:${PORT}/bootstrap.sh | bash -s ${LOCAL_IP}:${PORT} && ~/scripts/install-all.sh${NC}"
+echo -e "  ${BOLD}curl -fsSL http://${LOCAL_IP}:${PORT}/bootstrap.sh | bash -s ${LOCAL_IP}:${PORT} && ~/arch-setup/install-all.sh${NC}"
 echo ""
 echo -e "  ${GREEN}# Option 3: Download a single script${NC}"
 echo -e "  ${BOLD}curl -fsSL http://${LOCAL_IP}:${PORT}/00-install-paru.sh -o 00-install-paru.sh${NC}"

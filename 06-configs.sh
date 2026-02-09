@@ -24,6 +24,35 @@ backup_file() {
     fi
 }
 
+build_hypr_monitor_lines() {
+    local hypr_output main_monitor monitor
+    local -a monitors=()
+
+    if command -v hyprctl >/dev/null 2>&1; then
+        hypr_output="$(hyprctl monitors 2>/dev/null || true)"
+        if [[ -n "$hypr_output" ]]; then
+            main_monitor="$(awk '
+                /^Monitor / {mon=$2}
+                /focused: yes/ {print mon; exit}
+            ' <<< "$hypr_output")"
+
+            mapfile -t monitors < <(awk '/^Monitor / {print $2}' <<< "$hypr_output")
+
+            if [[ -n "$main_monitor" && ${#monitors[@]} -gt 0 ]]; then
+                printf 'monitor=%s,preferred,0x0,1\n' "$main_monitor"
+                for monitor in "${monitors[@]}"; do
+                    [[ "$monitor" == "$main_monitor" ]] && continue
+                    printf 'monitor=%s,preferred,auto,1\n' "$monitor"
+                done
+                return
+            fi
+        fi
+    fi
+
+    # Fallback for first boot / non-Hyprland sessions.
+    printf 'monitor=,preferred,auto,1\n'
+}
+
 [[ $EUID -eq 0 ]] && error "Do not run as root."
 
 # ── Hyprland ─────────────────────────────────────────────────────────────────
@@ -36,8 +65,7 @@ cat > "$HOME/.config/hypr/hyprland.conf" << 'HYPRCONF'
 ### MONITORS ###
 ################
 
-monitor=eDP-2,1920x1080@144,0x0,1
-monitor=HDMI-A-1,2560x1440@144,-2560x-450,1
+__MONITOR_LINES__
 
 ###################
 ### MY PROGRAMS ###
@@ -243,6 +271,13 @@ bindl = , XF86AudioPause, exec, playerctl play-pause
 bindl = , XF86AudioPlay, exec, playerctl play-pause
 bindl = , XF86AudioPrev, exec, playerctl previous
 HYPRCONF
+
+monitor_lines="$(build_hypr_monitor_lines)"
+awk -v monitor_lines="$monitor_lines" '
+    $0 == "__MONITOR_LINES__" {print monitor_lines; next}
+    {print}
+' "$HOME/.config/hypr/hyprland.conf" > "$HOME/.config/hypr/hyprland.conf.tmp"
+mv "$HOME/.config/hypr/hyprland.conf.tmp" "$HOME/.config/hypr/hyprland.conf"
 
 sed -i "s|__SCREENSHOT_DIR__|$HOME/Pictures/screenshots|g" "$HOME/.config/hypr/hyprland.conf"
 
