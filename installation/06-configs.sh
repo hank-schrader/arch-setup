@@ -24,6 +24,48 @@ backup_file() {
     fi
 }
 
+get_connected_monitors() {
+    local hypr_output connector status_file status_value
+    local -a monitors=()
+    local -A seen=()
+
+    if command -v hyprctl >/dev/null 2>&1; then
+        hypr_output="$(hyprctl monitors 2>/dev/null || true)"
+        if [[ -n "$hypr_output" ]]; then
+            while IFS= read -r connector; do
+                [[ -z "$connector" || -n "${seen[$connector]:-}" ]] && continue
+                seen["$connector"]=1
+                monitors+=("$connector")
+            done < <(awk '/^Monitor / {print $2}' <<< "$hypr_output")
+        fi
+    fi
+
+    if [[ ${#monitors[@]} -eq 0 ]] && command -v xrandr >/dev/null 2>&1; then
+        while IFS= read -r connector; do
+            [[ -z "$connector" || -n "${seen[$connector]:-}" ]] && continue
+            seen["$connector"]=1
+            monitors+=("$connector")
+        done < <(xrandr --query 2>/dev/null | awk '/ connected/ {print $1}')
+    fi
+
+    if [[ ${#monitors[@]} -eq 0 ]]; then
+        for status_file in /sys/class/drm/card*-*/status; do
+            [[ -f "$status_file" ]] || continue
+            status_value="$(<"$status_file")"
+            [[ "$status_value" == "connected" ]] || continue
+
+            connector="${status_file%/status}"
+            connector="${connector##*/}"
+            connector="${connector#*-}"
+            [[ -z "$connector" || -n "${seen[$connector]:-}" ]] && continue
+            seen["$connector"]=1
+            monitors+=("$connector")
+        done
+    fi
+
+    printf '%s\n' "${monitors[@]}"
+}
+
 build_hypr_monitor_lines() {
     local hypr_output main_monitor monitor
     local -a monitors=()
@@ -35,22 +77,53 @@ build_hypr_monitor_lines() {
                 /^Monitor / {mon=$2}
                 /focused: yes/ {print mon; exit}
             ' <<< "$hypr_output")"
-
-            mapfile -t monitors < <(awk '/^Monitor / {print $2}' <<< "$hypr_output")
-
-            if [[ -n "$main_monitor" && ${#monitors[@]} -gt 0 ]]; then
-                printf 'monitor=%s,preferred,0x0,1\n' "$main_monitor"
-                for monitor in "${monitors[@]}"; do
-                    [[ "$monitor" == "$main_monitor" ]] && continue
-                    printf 'monitor=%s,preferred,auto,1\n' "$monitor"
-                done
-                return
-            fi
         fi
+    fi
+
+    mapfile -t monitors < <(get_connected_monitors)
+
+    if [[ ${#monitors[@]} -gt 0 ]]; then
+        if [[ -z "$main_monitor" ]]; then
+            main_monitor="${monitors[0]}"
+        fi
+
+        printf 'monitor=%s,preferred,0x0,1\n' "$main_monitor"
+        for monitor in "${monitors[@]}"; do
+            [[ "$monitor" == "$main_monitor" ]] && continue
+            printf 'monitor=%s,preferred,auto,1\n' "$monitor"
+        done
+        return
     fi
 
     # Fallback for first boot / non-Hyprland sessions.
     printf 'monitor=,preferred,auto,1\n'
+}
+
+build_hyprpaper_wallpaper_blocks() {
+    local wallpaper_path="$1" monitor
+    local -a monitors=()
+
+    mapfile -t monitors < <(get_connected_monitors)
+
+    if [[ ${#monitors[@]} -eq 0 ]]; then
+        cat << EOF
+wallpaper {
+    monitor =
+    path = $wallpaper_path
+}
+EOF
+        return
+    fi
+
+    for monitor in "${monitors[@]}"; do
+        cat << EOF
+wallpaper {
+    monitor = $monitor
+    path = $wallpaper_path
+}
+
+EOF
+    done
 }
 
 [[ $EUID -eq 0 ]] && error "Do not run as root."
@@ -355,19 +428,13 @@ HYPRLOCK
 info "Writing Hyprpaper config..."
 backup_file "$HOME/.config/hypr/hyprpaper.conf"
 
+wallpaper_path="$HOME/Pictures/wallpaper2.png"
+hyprpaper_wallpaper_blocks="$(build_hyprpaper_wallpaper_blocks "$wallpaper_path")"
+
 cat > "$HOME/.config/hypr/hyprpaper.conf" << HYPRPAPER
-preload = /home/$USER/Pictures/wallpaper2.png
+preload = $wallpaper_path
 
-wallpaper {
-    monitor = eDP-2
-    path = /home/$USER/Pictures/wallpaper2.png
-}
-
-wallpaper {
-    monitor = HDMI-A-1
-    path = /home/$USER/Pictures/wallpaper2.png
-}
-
+$hyprpaper_wallpaper_blocks
 splash = false
 HYPRPAPER
 

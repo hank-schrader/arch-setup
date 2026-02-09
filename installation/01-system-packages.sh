@@ -246,4 +246,9 @@ paru -S --needed --noconfirm "${ALL_PACKAGES[@]}" || warn "Some packages may hav
 info "Installing AUR packages (${#AUR_PACKAGES[@]} packages)..."
 paru -S --needed --noconfirm "${AUR_PACKAGES[@]}" || warn "Some AUR packages may have failed — check output above."
 
+if ! pacman -Q hyprpaper >/dev/null 2>&1; then
+    warn "hyprpaper was not installed during bulk package setup. Retrying explicitly..."
+    paru -S --needed --noconfirm hyprpaper || error "Failed to install required package: hyprpaper"
+fi
+
 info "Package installation complete!"
