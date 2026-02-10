@@ -57,6 +57,21 @@ if [[ -f "$PRECHECK_SCRIPT" ]]; then
     fi
 fi
 
+MIRROR_SCRIPT="$SCRIPT_DIR/../dependency_region_selection/select-mirror.sh"
+if [[ -f "$MIRROR_SCRIPT" ]]; then
+    header "Mirror Selection"
+    if bash "$MIRROR_SCRIPT"; then
+        info "Mirror selection completed."
+    else
+        warn "Mirror selection failed. Continue with existing mirrors? [y/N]"
+        read -r response
+        if [[ ! "$response" =~ ^[Yy]$ ]]; then
+            echo "Aborted."
+            exit 1
+        fi
+    fi
+fi
+
 for entry in "${SCRIPTS[@]}"; do
     script="${entry%%:*}"
     desc="${entry#*:}"
