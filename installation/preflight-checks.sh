@@ -22,7 +22,10 @@ else
     error "Cannot read /etc/os-release."
 fi
 
-[[ "${ID:-}" == "arch" ]] || error "This setup is designed for Arch Linux. Detected: ${PRETTY_NAME:-unknown}."
+if [[ "${ID:-}" != "arch" ]] && [[ " ${ID_LIKE:-} " != *" arch "* ]]; then
+    error "This setup is designed for Arch Linux and Arch-based distributions. Detected: ${PRETTY_NAME:-unknown}."
+fi
+info "Supported Arch-based system detected: ${PRETTY_NAME:-unknown}."
 
 command -v sudo >/dev/null 2>&1 || error "sudo is required."
 if ! sudo -v; then
@@ -33,6 +36,17 @@ if command -v paru >/dev/null 2>&1; then
     info "paru detected: $(paru --version | head -1)"
 else
     warn "paru not found yet (expected before running 00-install-paru.sh)."
+fi
+
+if command -v Hyprland >/dev/null 2>&1; then
+    hyprland_version="$(Hyprland --version 2>/dev/null | awk 'NR == 1 {print $2}' || true)"
+    if [[ -n "$hyprland_version" ]] && [[ "$(printf '%s\n' "0.55" "$hyprland_version" | sort -V | head -n 1)" == "0.55" ]]; then
+        info "Hyprland $hyprland_version detected (Lua configuration supported)."
+    else
+        warn "Installed Hyprland ${hyprland_version:-unknown} predates the generated Lua config; 01-system-packages.sh will upgrade it."
+    fi
+else
+    info "Hyprland is not installed yet; 01-system-packages.sh will install the current Arch version."
 fi
 
 if grep -qE '^\[multilib\]' /etc/pacman.conf; then

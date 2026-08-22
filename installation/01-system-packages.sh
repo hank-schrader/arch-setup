@@ -251,4 +251,15 @@ if ! pacman -Q hyprpaper >/dev/null 2>&1; then
     paru -S --needed --noconfirm hyprpaper || error "Failed to install required package: hyprpaper"
 fi
 
+if ! command -v Hyprland >/dev/null 2>&1; then
+    warn "Hyprland was not installed during bulk package setup. Retrying explicitly..."
+    paru -S --needed --noconfirm hyprland || error "Failed to install required package: hyprland"
+fi
+
+hyprland_version="$(Hyprland --version 2>/dev/null | awk 'NR == 1 {print $2}' || true)"
+if [[ -z "$hyprland_version" ]] || [[ "$(printf '%s\n' "0.55" "$hyprland_version" | sort -V | head -n 1)" != "0.55" ]]; then
+    error "Hyprland ${hyprland_version:-unknown} is too old; the generated Lua configuration requires 0.55+."
+fi
+info "Hyprland $hyprland_version supports the generated Lua configuration."
+
 info "Package installation complete!"

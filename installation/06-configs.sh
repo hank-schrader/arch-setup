@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================================
 # 06-configs.sh — Deploy all dotfiles and application configs
-#   Hyprland, Hyprpaper, Hyprlock, Ghostty, Foot, Rofi
+#   Hyprland 0.55+ (Lua), Hyprpaper, Hyprlock, Ghostty, Foot, Rofi
 # Run AFTER packages are installed
 # ============================================================================
 set -euo pipefail
@@ -66,37 +66,106 @@ get_connected_monitors() {
     printf '%s\n' "${monitors[@]}"
 }
 
-build_hypr_monitor_lines() {
-    local hypr_output main_monitor monitor
-    local -a monitors=()
+lua_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s' "$value"
+}
 
-    if command -v hyprctl >/dev/null 2>&1; then
-        hypr_output="$(hyprctl monitors 2>/dev/null || true)"
-        if [[ -n "$hypr_output" ]]; then
-            main_monitor="$(awk '
-                /^Monitor / {mon=$2}
-                /focused: yes/ {print mon; exit}
-            ' <<< "$hypr_output")"
-        fi
+get_active_monitor_specs() {
+    local hypr_output
+
+    command -v hyprctl >/dev/null 2>&1 || return 0
+    hypr_output="$(hyprctl monitors 2>/dev/null || true)"
+    [[ -n "$hypr_output" ]] || return 0
+
+    awk '
+        function emit() {
+            if (name != "") {
+                printf "%s\t%s\t%s\t%s\t%s\n", name, mode, position, scale, transform
+            }
+        }
+
+        /^Monitor / {
+            emit()
+            name = $2
+            mode = "preferred"
+            position = "auto"
+            scale = "1"
+            transform = "0"
+            next
+        }
+
+        name != "" && /^[[:space:]]+[0-9]+x[0-9]+@[^[:space:]]+[[:space:]]+at[[:space:]]+/ {
+            mode = $1
+            position = $3
+            next
+        }
+
+        name != "" && /^[[:space:]]+scale:/ {
+            scale = $2
+            next
+        }
+
+        name != "" && /^[[:space:]]+transform:/ {
+            transform = $2
+            next
+        }
+
+        END { emit() }
+    ' <<< "$hypr_output"
+}
+
+build_hypr_monitor_lua() {
+    local monitor mode position scale transform
+    local -a monitors=()
+    local active_specs
+
+    active_specs="$(get_active_monitor_specs)"
+    if [[ -n "$active_specs" ]]; then
+        while IFS=$'\t' read -r monitor mode position scale transform; do
+            [[ -n "$monitor" ]] || continue
+            cat << EOF
+hl.monitor({
+    output = "$(lua_escape "$monitor")",
+    mode = "$(lua_escape "$mode")",
+    position = "$(lua_escape "$position")",
+    scale = $scale,
+    transform = $transform,
+})
+
+EOF
+        done <<< "$active_specs"
+        return
     fi
 
     mapfile -t monitors < <(get_connected_monitors)
 
     if [[ ${#monitors[@]} -gt 0 ]]; then
-        if [[ -z "$main_monitor" ]]; then
-            main_monitor="${monitors[0]}"
-        fi
-
-        printf 'monitor=%s,preferred,0x0,1\n' "$main_monitor"
         for monitor in "${monitors[@]}"; do
-            [[ "$monitor" == "$main_monitor" ]] && continue
-            printf 'monitor=%s,preferred,auto,1\n' "$monitor"
+            cat << EOF
+hl.monitor({
+    output = "$(lua_escape "$monitor")",
+    mode = "preferred",
+    position = "auto",
+    scale = 1,
+})
+
+EOF
         done
         return
     fi
 
     # Fallback for first boot / non-Hyprland sessions.
-    printf 'monitor=,preferred,auto,1\n'
+    cat << 'EOF'
+hl.monitor({
+    output = "",
+    mode = "preferred",
+    position = "auto",
+    scale = 1,
+})
+EOF
 }
 
 build_hyprpaper_wallpaper_blocks() {
@@ -129,230 +198,242 @@ EOF
 [[ $EUID -eq 0 ]] && error "Do not run as root."
 
 # ── Hyprland ─────────────────────────────────────────────────────────────────
-info "Writing Hyprland config..."
+command -v Hyprland >/dev/null 2>&1 || error "Hyprland is not installed. Run 01-system-packages.sh first."
+
+hyprland_version="$(Hyprland --version 2>/dev/null | awk 'NR == 1 {print $2}' || true)"
+[[ -n "$hyprland_version" ]] || error "Could not determine the installed Hyprland version."
+if [[ "$(printf '%s\n' "0.55" "$hyprland_version" | sort -V | head -n 1)" != "0.55" ]]; then
+    error "Hyprland $hyprland_version is too old for the generated Lua config (requires 0.55+)."
+fi
+
+info "Writing Hyprland $hyprland_version Lua config..."
 mkdir -p "$HOME/.config/hypr"
+backup_file "$HOME/.config/hypr/hyprland.lua"
 backup_file "$HOME/.config/hypr/hyprland.conf"
 
-cat > "$HOME/.config/hypr/hyprland.conf" << 'HYPRCONF'
-################
-### MONITORS ###
-################
+hyprland_config="$HOME/.config/hypr/hyprland.lua"
+hyprland_config_tmp="$HOME/.config/hypr/.hyprland.generated.lua"
+trap 'rm -f "$hyprland_config_tmp"' EXIT
 
-__MONITOR_LINES__
+{
+    cat << 'HYPRLUA'
+-- Managed by arch-setup for Hyprland 0.55+.
 
-###################
-### MY PROGRAMS ###
-###################
+------------------
+---- MONITORS ----
+------------------
 
-$fileManager = dolphin
-$terminal = ghostty
-$menu = wofi --show drun
+HYPRLUA
 
-#################
-### AUTOSTART ###
-#################
+    build_hypr_monitor_lua
 
-exec-once = hyprpaper
+    cat << 'HYPRLUA'
+---------------------
+---- MY PROGRAMS ----
+---------------------
 
-#############################
-### ENVIRONMENT VARIABLES ###
-#############################
+local terminal = "ghostty"
+local fileManager = "dolphin"
+local menu = "rofi -show drun"
+local home = os.getenv("HOME") or "."
+local screenshots = home .. "/Pictures/screenshots"
+local wallpaper = home .. "/Pictures/wallpaper2.png"
 
-env = XCURSOR_SIZE,24
-env = HYPRCURSOR_SIZE,24
-env = LIBVA_DRIVER_NAME,nvidia
-env = XDG_SESSION_TYPE,wayland
-env = GBM_BACKEND,nvidia-drm
-env = __GLX_VENDOR_LIBRARY_NAME,nvidia
+local function shell_quote(value)
+    return string.format("%q", value)
+end
 
-#####################
-### LOOK AND FEEL ###
-#####################
+-------------------
+---- AUTOSTART ----
+-------------------
 
-general {
-    gaps_in = 3
-    gaps_out = 5
-    border_size = 0
-    col.active_border = rgba(33ccffee) rgba(00ff99ee) 45deg
-    col.inactive_border = rgba(595959aa)
-    resize_on_border = false
-    allow_tearing = false
-    layout = dwindle
-}
+hl.on("hyprland.start", function()
+    hl.exec_cmd("test -f " .. shell_quote(wallpaper) .. " && hyprpaper")
+end)
 
-decoration {
-    rounding = 10
-    rounding_power = 2
-    active_opacity = 1.0
-    inactive_opacity = 1.0
+-------------------------------
+---- ENVIRONMENT VARIABLES ----
+-------------------------------
 
-    shadow {
-        enabled = true
-        range = 4
-        render_power = 3
-        color = rgba(1a1a1aee)
-    }
+hl.env("XCURSOR_SIZE", "24")
+hl.env("HYPRCURSOR_SIZE", "24")
+hl.env("LIBVA_DRIVER_NAME", "nvidia")
+hl.env("XDG_SESSION_TYPE", "wayland")
+hl.env("GBM_BACKEND", "nvidia-drm")
+hl.env("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
 
-    blur {
-        enabled = true
-        size = 3
-        passes = 1
-        vibrancy = 0.1696
-    }
-}
+-----------------------
+---- LOOK AND FEEL ----
+-----------------------
 
-animations {
-    enabled = yes, please :)
+hl.config({
+    general = {
+        gaps_in = 3,
+        gaps_out = 5,
+        border_size = 0,
+        col = {
+            active_border = {
+                colors = { "rgba(33ccffee)", "rgba(00ff99ee)" },
+                angle = 45,
+            },
+            inactive_border = "rgba(595959aa)",
+        },
+        resize_on_border = false,
+        allow_tearing = false,
+        layout = "dwindle",
+    },
 
-    bezier = easeOutQuint,   0.23, 1,    0.32, 1
-    bezier = easeInOutCubic, 0.65, 0.05, 0.36, 1
-    bezier = linear,         0,    0,    1,    1
-    bezier = almostLinear,   0.5,  0.5,  0.75, 1
-    bezier = quick,          0.15, 0,    0.1,  1
+    decoration = {
+        rounding = 10,
+        rounding_power = 2,
+        active_opacity = 1.0,
+        inactive_opacity = 1.0,
+        shadow = {
+            enabled = true,
+            range = 4,
+            render_power = 3,
+            color = 0xee1a1a1a,
+        },
+        blur = {
+            enabled = true,
+            size = 3,
+            passes = 1,
+            vibrancy = 0.1696,
+        },
+    },
 
-    animation = global,        1,     10,    default
-    animation = border,        1,     5.39,  easeOutQuint
-    animation = windows,       1,     4.79,  easeOutQuint
-    animation = windowsIn,     1,     4.1,   easeOutQuint, popin 87%
-    animation = windowsOut,    1,     1.49,  linear,       popin 87%
-    animation = fadeIn,        1,     1.73,  almostLinear
-    animation = fadeOut,       1,     1.46,  almostLinear
-    animation = fade,          1,     3.03,  quick
-    animation = layers,        1,     3.81,  easeOutQuint
-    animation = layersIn,      1,     4,     easeOutQuint, fade
-    animation = layersOut,     1,     1.5,   linear,       fade
-    animation = fadeLayersIn,  1,     1.79,  almostLinear
-    animation = fadeLayersOut, 1,     1.39,  almostLinear
-    animation = workspaces,    1,     1.94,  almostLinear, fade
-    animation = workspacesIn,  1,     1.21,  almostLinear, fade
-    animation = workspacesOut, 1,     1.94,  almostLinear, fade
-    animation = zoomFactor,    1,     7,     quick
-}
+    animations = {
+        enabled = true,
+    },
 
-dwindle {
-    pseudotile = true
-    preserve_split = true
-}
+    dwindle = {
+        preserve_split = true,
+    },
 
-master {
-    new_status = master
-}
+    master = {
+        new_status = "master",
+    },
 
-misc {
-    force_default_wallpaper = 0
-    disable_hyprland_logo = true
-}
+    misc = {
+        force_default_wallpaper = 0,
+        disable_hyprland_logo = true,
+    },
+})
 
-#############
-### INPUT ###
-#############
+hl.curve("easeOutQuint",   { type = "bezier", points = { {0.23, 1}, {0.32, 1} } })
+hl.curve("easeInOutCubic", { type = "bezier", points = { {0.65, 0.05}, {0.36, 1} } })
+hl.curve("linear",         { type = "bezier", points = { {0, 0}, {1, 1} } })
+hl.curve("almostLinear",   { type = "bezier", points = { {0.5, 0.5}, {0.75, 1} } })
+hl.curve("quick",          { type = "bezier", points = { {0.15, 0}, {0.1, 1} } })
 
-input {
-    kb_layout = us,ru
-    kb_variant =
-    kb_model =
-    kb_options =
-    kb_rules =
-    follow_mouse = 1
-    sensitivity = 0
+hl.animation({ leaf = "global",        enabled = true, speed = 10,   bezier = "default" })
+hl.animation({ leaf = "border",        enabled = true, speed = 5.39, bezier = "easeOutQuint" })
+hl.animation({ leaf = "windows",       enabled = true, speed = 4.79, bezier = "easeOutQuint" })
+hl.animation({ leaf = "windowsIn",     enabled = true, speed = 4.1,  bezier = "easeOutQuint", style = "popin 87%" })
+hl.animation({ leaf = "windowsOut",    enabled = true, speed = 1.49, bezier = "linear", style = "popin 87%" })
+hl.animation({ leaf = "fadeIn",        enabled = true, speed = 1.73, bezier = "almostLinear" })
+hl.animation({ leaf = "fadeOut",       enabled = true, speed = 1.46, bezier = "almostLinear" })
+hl.animation({ leaf = "fade",          enabled = true, speed = 3.03, bezier = "quick" })
+hl.animation({ leaf = "layers",        enabled = true, speed = 3.81, bezier = "easeOutQuint" })
+hl.animation({ leaf = "layersIn",      enabled = true, speed = 4,    bezier = "easeOutQuint", style = "fade" })
+hl.animation({ leaf = "layersOut",     enabled = true, speed = 1.5,  bezier = "linear", style = "fade" })
+hl.animation({ leaf = "fadeLayersIn",  enabled = true, speed = 1.79, bezier = "almostLinear" })
+hl.animation({ leaf = "fadeLayersOut", enabled = true, speed = 1.39, bezier = "almostLinear" })
+hl.animation({ leaf = "workspaces",    enabled = true, speed = 1.94, bezier = "almostLinear", style = "fade" })
+hl.animation({ leaf = "workspacesIn",  enabled = true, speed = 1.21, bezier = "almostLinear", style = "fade" })
+hl.animation({ leaf = "workspacesOut", enabled = true, speed = 1.94, bezier = "almostLinear", style = "fade" })
+hl.animation({ leaf = "zoomFactor",    enabled = true, speed = 7,    bezier = "quick" })
 
-    touchpad {
-        natural_scroll = true
-    }
-}
+---------------
+---- INPUT ----
+---------------
 
-gesture = 3, horizontal, workspace
+hl.config({
+    input = {
+        kb_layout = "us,ru",
+        kb_variant = "",
+        kb_model = "",
+        kb_options = "",
+        kb_rules = "",
+        follow_mouse = 1,
+        sensitivity = 0,
+        touchpad = {
+            natural_scroll = true,
+        },
+    },
+})
 
-device {
-    name = epic-mouse-v1
-    sensitivity = -0.5
-}
+hl.gesture({ fingers = 3, direction = "horizontal", action = "workspace" })
 
-###################
-### KEYBINDINGS ###
-###################
+hl.device({
+    name = "epic-mouse-v1",
+    sensitivity = -0.5,
+})
 
-$mainMod = SUPER
+---------------------
+---- KEYBINDINGS ----
+---------------------
 
-bind = SUPER, Q, killactive
-bind = SUPER, T, exec, ghostty
-bind = SUPER, A, exec, rofi -show drun
-bind = SUPER, L, exec, hyprlock
-bind = SUPER, F, fullscreen
-bind = ALT, TAB, cyclenext
-bind = SUPER, SPACE, exec, hyprctl switchxkblayout current next
-bind = SUPER, PRINT, exec, hyprshot -m region -o __SCREENSHOT_DIR__
+local mainMod = "SUPER"
 
-bind = $mainMod, RETURN, exec, $terminal
-bind = $mainMod, M, exit,
-bind = $mainMod, E, exec, $fileManager
-bind = $mainMod, V, togglefloating,
-bind = $mainMod, P, pseudo,
-bind = $mainMod, J, togglesplit,
+hl.bind(mainMod .. " + Q", hl.dsp.window.close())
+hl.bind(mainMod .. " + T", hl.dsp.exec_cmd(terminal))
+hl.bind(mainMod .. " + RETURN", hl.dsp.exec_cmd(terminal))
+hl.bind(mainMod .. " + A", hl.dsp.exec_cmd(menu))
+hl.bind(mainMod .. " + L", hl.dsp.exec_cmd("hyprlock"))
+hl.bind(mainMod .. " + F", hl.dsp.window.fullscreen())
+hl.bind("ALT + TAB", hl.dsp.window.cycle_next())
+hl.bind(mainMod .. " + SPACE", hl.dsp.exec_cmd("hyprctl switchxkblayout current next"))
+hl.bind(mainMod .. " + PRINT", hl.dsp.exec_cmd("mkdir -p " .. shell_quote(screenshots) .. " && hyprshot -m region -o " .. shell_quote(screenshots)))
+hl.bind(mainMod .. " + M", hl.dsp.exec_cmd("uwsm stop"))
+hl.bind(mainMod .. " + E", hl.dsp.exec_cmd(fileManager))
+hl.bind(mainMod .. " + V", hl.dsp.window.float({ action = "toggle" }))
+hl.bind(mainMod .. " + P", hl.dsp.window.pseudo())
+hl.bind(mainMod .. " + J", hl.dsp.layout("togglesplit"))
 
-# Move focus
-bind = $mainMod, left, movefocus, l
-bind = $mainMod, right, movefocus, r
-bind = $mainMod, up, movefocus, u
-bind = $mainMod, down, movefocus, d
+hl.bind(mainMod .. " + left",  hl.dsp.focus({ direction = "l" }))
+hl.bind(mainMod .. " + right", hl.dsp.focus({ direction = "r" }))
+hl.bind(mainMod .. " + up",    hl.dsp.focus({ direction = "u" }))
+hl.bind(mainMod .. " + down",  hl.dsp.focus({ direction = "d" }))
 
-# Workspaces
-bind = $mainMod, 1, workspace, 1
-bind = $mainMod, 2, workspace, 2
-bind = $mainMod, 3, workspace, 3
-bind = $mainMod, 4, workspace, 4
-bind = $mainMod, 5, workspace, 5
-bind = $mainMod, 6, workspace, 6
-bind = $mainMod, 7, workspace, 7
-bind = $mainMod, 8, workspace, 8
-bind = $mainMod, 9, workspace, 9
-bind = $mainMod, 0, workspace, 10
+for i = 1, 10 do
+    local key = i % 10
+    hl.bind(mainMod .. " + " .. key, hl.dsp.focus({ workspace = i }))
+    hl.bind(mainMod .. " + SHIFT + " .. key, hl.dsp.window.move({ workspace = i, follow = false }))
+end
 
-# Move to workspace
-bind = $mainMod SHIFT, 1, movetoworkspacesilent, 1
-bind = $mainMod SHIFT, 2, movetoworkspacesilent, 2
-bind = $mainMod SHIFT, 3, movetoworkspacesilent, 3
-bind = $mainMod SHIFT, 4, movetoworkspacesilent, 4
-bind = $mainMod SHIFT, 5, movetoworkspacesilent, 5
-bind = $mainMod SHIFT, 6, movetoworkspacesilent, 6
-bind = $mainMod SHIFT, 7, movetoworkspacesilent, 7
-bind = $mainMod SHIFT, 8, movetoworkspacesilent, 8
-bind = $mainMod SHIFT, 9, movetoworkspacesilent, 9
-bind = $mainMod SHIFT, 0, movetoworkspacesilent, 10
+hl.bind(mainMod .. " + S", hl.dsp.workspace.toggle_special("magic"))
+hl.bind(mainMod .. " + SHIFT + S", hl.dsp.window.move({ workspace = "special:magic" }))
+hl.bind(mainMod .. " + mouse_down", hl.dsp.focus({ workspace = "e+1" }))
+hl.bind(mainMod .. " + mouse_up", hl.dsp.focus({ workspace = "e-1" }))
+hl.bind(mainMod .. " + mouse:272", hl.dsp.window.drag(), { mouse = true })
+hl.bind(mainMod .. " + mouse:273", hl.dsp.window.resize(), { mouse = true })
 
-# Scratchpad
-bind = $mainMod, S, togglespecialworkspace, magic
-bind = $mainMod SHIFT, S, movetoworkspace, special:magic
+hl.bind("XF86AudioRaiseVolume", hl.dsp.exec_cmd("wpctl set-volume -l 1 @DEFAULT_AUDIO_SINK@ 5%+"), { locked = true, repeating = true })
+hl.bind("XF86AudioLowerVolume", hl.dsp.exec_cmd("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"), { locked = true, repeating = true })
+hl.bind("XF86AudioMute", hl.dsp.exec_cmd("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"), { locked = true })
+hl.bind("XF86AudioMicMute", hl.dsp.exec_cmd("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"), { locked = true })
+hl.bind("XF86MonBrightnessUp", hl.dsp.exec_cmd("brightnessctl -e4 -n2 set 5%+"), { locked = true, repeating = true })
+hl.bind("XF86MonBrightnessDown", hl.dsp.exec_cmd("brightnessctl -e4 -n2 set 5%-"), { locked = true, repeating = true })
+hl.bind("XF86AudioNext", hl.dsp.exec_cmd("playerctl next"), { locked = true })
+hl.bind("XF86AudioPause", hl.dsp.exec_cmd("playerctl play-pause"), { locked = true })
+hl.bind("XF86AudioPlay", hl.dsp.exec_cmd("playerctl play-pause"), { locked = true })
+hl.bind("XF86AudioPrev", hl.dsp.exec_cmd("playerctl previous"), { locked = true })
+HYPRLUA
+} > "$hyprland_config_tmp"
 
-# Mouse
-bind = $mainMod, mouse_down, workspace, e+1
-bind = $mainMod, mouse_up, workspace, e-1
-bindm = $mainMod, mouse:272, movewindow
-bindm = $mainMod, mouse:273, resizewindow
+if ! hypr_verify_output="$(Hyprland --verify-config -c "$hyprland_config_tmp" 2>&1)"; then
+    printf '%s\n' "$hypr_verify_output" >&2
+    error "Generated Hyprland Lua config failed validation; existing config was preserved."
+fi
 
-# Media keys
-bindel = ,XF86AudioRaiseVolume, exec, wpctl set-volume -l 1 @DEFAULT_AUDIO_SINK@ 5%+
-bindel = ,XF86AudioLowerVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
-bindel = ,XF86AudioMute, exec, wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
-bindel = ,XF86AudioMicMute, exec, wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle
-bindel = ,XF86MonBrightnessUp, exec, brightnessctl -e4 -n2 set 5%+
-bindel = ,XF86MonBrightnessDown, exec, brightnessctl -e4 -n2 set 5%-
+mv "$hyprland_config_tmp" "$hyprland_config"
+trap - EXIT
+info "Hyprland Lua config validated successfully."
 
-# Player controls
-bindl = , XF86AudioNext, exec, playerctl next
-bindl = , XF86AudioPause, exec, playerctl play-pause
-bindl = , XF86AudioPlay, exec, playerctl play-pause
-bindl = , XF86AudioPrev, exec, playerctl previous
-HYPRCONF
-
-monitor_lines="$(build_hypr_monitor_lines)"
-awk -v monitor_lines="$monitor_lines" '
-    $0 == "__MONITOR_LINES__" {print monitor_lines; next}
-    {print}
-' "$HOME/.config/hypr/hyprland.conf" > "$HOME/.config/hypr/hyprland.conf.tmp"
-mv "$HOME/.config/hypr/hyprland.conf.tmp" "$HOME/.config/hypr/hyprland.conf"
-
-sed -i "s|__SCREENSHOT_DIR__|$HOME/Pictures/screenshots|g" "$HOME/.config/hypr/hyprland.conf"
+if [[ -f "$HOME/.config/hypr/hyprland.conf" ]]; then
+    warn "Legacy hyprland.conf was backed up and left in place; Hyprland 0.55+ uses hyprland.lua by default."
+fi
 
 # ── Hyprlock ─────────────────────────────────────────────────────────────────
 info "Writing Hyprlock config..."
@@ -432,8 +513,6 @@ wallpaper_path="$HOME/Pictures/wallpaper2.png"
 hyprpaper_wallpaper_blocks="$(build_hyprpaper_wallpaper_blocks "$wallpaper_path")"
 
 cat > "$HOME/.config/hypr/hyprpaper.conf" << HYPRPAPER
-preload = $wallpaper_path
-
 $hyprpaper_wallpaper_blocks
 splash = false
 HYPRPAPER

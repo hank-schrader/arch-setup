@@ -38,7 +38,7 @@ SCRIPTS=(
     "03-services-and-users.sh:Enable services & user groups"
     "04-dev-tools.sh:Install developer toolchains"
     "05-shell-setup.sh:Configure Zsh & Oh My Zsh"
-    "06-configs.sh:Deploy dotfiles & app configs"
+    "06-configs.sh:Deploy Hyprland 0.55+ Lua & app configs"
     "07-docker-setup.sh:Docker post-install setup"
 )
 
